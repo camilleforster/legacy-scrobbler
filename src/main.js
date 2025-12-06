@@ -170,15 +170,12 @@ async function handleWriteConfig (event, { action, key, value }) {
 }
 
 async function handleDeleteFile (event, { path }) {
-  console.log('Deleting file:', path)
-
   const playcountPath = path + '/Play Counts'
   fs.unlink(playcountPath, err => {
     if (err) {
       console.error('Error deleting file:', err)
       event.returnValue = { success: false, error: err.message }
     } else {
-      console.log('File deleted successfully')
       event.returnValue = { success: true }
     }
   })

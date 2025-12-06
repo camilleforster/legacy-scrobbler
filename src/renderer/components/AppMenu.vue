@@ -5,6 +5,12 @@
       :src="eraseIcon"
       alt="Erase"
       @click="clearPlayCounts"
+      :disabled="
+        isUploading ||
+        isLoading ||
+        preferences.lastFm.apiKey === '' ||
+        selectedTracklist.length === 0
+      "
       :class="{
         disabled:
           isUploading ||
@@ -104,7 +110,7 @@ function openSettings () {
 }
 
 function clearPlayCounts () {
-  if (isLoading.value === false && preferences.lastFm.apiKey !== '') {
+  if (isLoading.value === false && preferences.lastFm.apiKey !== '' && selectedTracklist.length > 0) {
     emit('clearPlayCounts')
   }
 }

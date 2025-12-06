@@ -111,7 +111,6 @@ function closeSettings () {
 const openDialog = async () => {
   const filePath = await window.ipc.openFile()
   setPreferences('singleConfig', 'devicePath', filePath)
-  console.log(preferences.devicePath)
 }
 
 const formatDate = unixtime => {

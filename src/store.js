@@ -32,7 +32,6 @@ function readConfigFile () {
 }
 
 function writeConfigFile (config) {
-  // console.log('writing config file', config)
   try {
     fs.writeFileSync(configFilePath, JSON.stringify(config))
   } catch (error) {

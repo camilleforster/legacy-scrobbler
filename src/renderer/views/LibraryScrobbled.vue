@@ -4,8 +4,8 @@
     <h1>iPod Library Scrobbled</h1>
     <p>{{ formattedPlaytime }} of Music saved.</p>
     <p>
-      {{ selectedTracklist.length }}
-      {{ selectedTracklist.length > 1 ? 'Tracks' : 'Track' }} submitted.
+      {{ scrobbled.tracks }}
+      {{ scrobbled.tracks > 1 ? 'Tracks' : 'Track' }} submitted.
     </p>
   </div>
 </template>
@@ -13,7 +13,7 @@
 <script setup>
 import { computed } from 'vue'
 import { useTracklist } from '../composables/useTracklist.js'
-const { selectedTracklist, playtime } = useTracklist()
+const { scrobbled } = useTracklist()
 
 import check_solid from '../assets/icons/check-solid.svg'
 
@@ -43,7 +43,7 @@ const formatPlaytime = playtimeInSeconds => {
 }
 
 const formattedPlaytime = computed(() => {
-  return formatPlaytime(playtime.value)
+  return formatPlaytime(scrobbled.playtime)
 })
 </script>
 

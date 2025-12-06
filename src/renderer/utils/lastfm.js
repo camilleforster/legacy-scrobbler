@@ -69,7 +69,6 @@ export async function login (userToken) {
       return { status: true, message: '' }
     }
   } catch (error) {
-    console.log(error)
     return {
       status: false,
       message: 'Legacy Scrobbler service seems to be offline. Sorry.'
@@ -103,7 +102,6 @@ export async function updateProfile () {
 }
 
 export async function scrobbleTracks(tracklist) {
-  console.log("tracklist", tracklist)
 
   if (await sendScrobbleRequest(tracklist)) {
       return { status: true }

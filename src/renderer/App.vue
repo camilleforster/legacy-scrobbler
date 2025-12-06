@@ -160,7 +160,6 @@ const renderComponent = computed(() => {
 
 // get the tracklist from the iPod
 const getTracklist = async () => {
-  console.log('Getting Tracklist')
   processing.value = true
   await getDeviceState()
   await clearTracklist()
@@ -193,10 +192,8 @@ const getTracklist = async () => {
 }
 
 const clearPlayCounts = async resetScrobbled => {
-  console.log('Clearing Playcounts')
   const deletedFile = await window.ipc.deletePlaycount(path.value)
   if (deletedFile) {
-    console.log('Deleted Playcounts')
     await clearTracklist()
     if (resetScrobbled) {
       await clearScrobbled()
@@ -220,17 +217,13 @@ const getDeviceState = async () => {
     setDeviceState('no-plays')
     // if the device state changed from ready to no-plays
     // that means the PlayCount file was deleted by synchronizing the iPod using another App -> clear the playcounts back to default
-    if (previousDeviceState === 'ready' && scrobbled.state === true) {
-      console.log('iPod was synchronized with another App')
+    if (previousDeviceState === 'ready' && scrobbled.state === true && preferences.autoDelete) {
       await clearPlayCounts(true)
     }
   } else if (receivedDeviceState === 'ready') {
     setDeviceState('ready')
   }
-  // only console.log the device state if it has changed
-  if (receivedDeviceState !== previousDeviceState) {
-    console.log('Device-State: ', receivedDeviceState)
-  }
+  // device state changed; can be used to trigger UI updates if needed
 }
 
 const toggleSettings = () => {
@@ -238,15 +231,14 @@ const toggleSettings = () => {
 }
 
 const scrobbleNewTracks = async () => {
-  console.log('Uploading New Tracks')
   isUploading.value = true
 
   const { status } = await scrobbleTracks(selectedTracklist)
 
   if (status) {
-    console.log('Tracks Scrobbled')
     scrobbled.tracks = selectedTracklist.length
     scrobbled.playtime = playtime.value
+    scrobbled.state = true
     await clearTracklist()
     if (preferences.autoDelete) {
       await clearPlayCounts(false)
@@ -256,7 +248,6 @@ const scrobbleNewTracks = async () => {
       addTrackStatus(track, 'pending')
     })
     const failedTracks = await scrobbleTracksIndividually(selectedTracklist, updateTrackStatus)
-    console.log("Some tracks failed",failedTracks)
     scrobbled.tracks = selectedTracklist.length
 
     failedTracks.forEach((track) => {
@@ -278,7 +269,6 @@ async function checkProfile () {
   const login = await updateProfile()
   if (login) {
     preferences.lastFm.loggedIn = true
-    console.log('Logged in')
   } else {
     preferences.lastFm.loggedIn = false
     showAccessPopup()
@@ -293,9 +283,7 @@ async function handleConnect () {
 async function handleLogin () {
   const userToken = preferences.lastFm.userToken
   const { status, message } = await login(userToken)
-  console.log(status, message)
   if (status) {
-    console.log('Logged in')
     preferences.lastFm.loggedIn = true
     popup.state = false
     updateProfile()

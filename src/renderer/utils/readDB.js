@@ -1,15 +1,39 @@
 const { open } = require('fs/promises')
+const zlib = require('zlib')
+const { promisify } = require('util')
+
+const inflateRaw = promisify(zlib.inflateRaw)
+
+function isCompressed (filePath) {
+  return filePath.includes('iTunesCDB')
+}
 
 async function parseItunesDb (filePath) {
   let tracklist = []
   try {
-    console.log('Reading iTunesDB file:', filePath)
     const handler = await open(filePath, 'r')
 
+    if (isCompressed(filePath)) {
+      tracklist = await parseCompressedItunesDb(handler)
+    } else {
+      tracklist = await parseUncompressedItunesDb(handler)
+    }
+
+    if (handler) {
+      await handler.close()
+    }
+  } catch (error) {
+    console.error('Error:', error)
+    throw error
+  }
+  return tracklist
+}
+
+async function parseUncompressedItunesDb (handler) {
+  let tracklist = []
+  try {
     let totalBytesRead = 0
-
     const bufferSize = 1 * 1024 * 1024 // 1 MB buffer size
-
     const buffer = Buffer.alloc(bufferSize)
 
     while (true) {
@@ -19,30 +43,260 @@ async function parseItunesDb (filePath) {
         totalBytesRead,
         bufferSize
       )
-      for (let i = 0; i < bytesRead; i++) {
-        const byte = buffer[i]
-        if (byte === 109 && bytesRead - i >= 4) {
-          const nextBytes = buffer.toString('utf8', i + 1, i + 4)
-          if (nextBytes === 'hit') {
-            const track = await parseMhit(handler, totalBytesRead + i + 4)
-            tracklist.push(track)
-          }
-        }
-      }
+      await searchMhitInBuffer(buffer, bytesRead, tracklist, handler, totalBytesRead)
+      
       totalBytesRead += bytesRead
       if (bytesRead < bufferSize) {
         break // End of file reached
       }
     }
-    if (handler) {
-      await handler.close()
-      console.log('File handler library closed successfully.')
-    }
   } catch (error) {
-    console.error('Error:', error)
-    throw error
+    console.error('Error in parseUncompressedItunesDb:', error)
   }
   return tracklist
+}
+
+async function parseCompressedItunesDb (handler) {
+  let tracklist = []
+  try {
+    // Read MHBD header to get compressed data offset
+    const headerBuffer = Buffer.alloc(4)
+    await readBytesAtPosition(handler, headerBuffer, 0, 4)
+    if (headerBuffer.toString('ascii') !== 'mhbd') {
+      console.warn('Invalid MHBD header')
+      return tracklist
+    }
+
+    // Read MHBD header size
+    const mhbdHeaderBuffer = Buffer.alloc(4)
+    await readBytesAtPosition(handler, mhbdHeaderBuffer, 4, 4)
+    const mhbdHeaderSize = readUInt32LE(mhbdHeaderBuffer)
+
+
+    // Read and decompress data
+    const compressedData = Buffer.alloc(50 * 1024 * 1024) // 50MB buffer
+    const bytesRead = await readBytesAtPosition(handler, compressedData, mhbdHeaderSize, 50 * 1024 * 1024)
+    const deflateData = compressedData.slice(2, bytesRead) // Skip 2-byte zlib header
+
+    let decompressed
+    try {
+      decompressed = await inflateRaw(deflateData)
+    } catch (error) {
+      console.error('[iTunesCDB] Decompression error:', error)
+      throw error
+    }
+
+
+    // Parse decompressed data with proper structure (MHSD → MHLT → MHIT)
+    tracklist = await parseDecompressedDatabase(decompressed)
+  } catch (error) {
+    console.error('Error in parseCompressedItunesDb:', error)
+  }
+  return tracklist
+}
+
+async function parseDecompressedDatabase (buffer) {
+  const tracklist = []
+  let pos = 0
+
+  try {
+
+    // Look for MHSD (dataset) containers
+    while (pos < buffer.length - 8) {
+      const marker = buffer.toString('ascii', pos, pos + 4)
+
+      if (marker === 'mhsd') {
+        const mhsdHeaderSize = readUInt32LE(buffer.slice(pos + 4, pos + 8))
+        const mhsdTotalSize = readUInt32LE(buffer.slice(pos + 8, pos + 12))
+        const datasetType = readUInt32LE(buffer.slice(pos + 12, pos + 16))
+
+
+        if (datasetType === 1) {
+          // Track list - skip to MHLT
+          const mhltPos = pos + mhsdHeaderSize
+          const tracks = await parseTrackList(buffer, mhltPos)
+          tracklist.push(...tracks)
+          break // We only need the track list
+        }
+
+        pos += mhsdTotalSize
+      } else {
+        pos += 1 // Move forward one byte and search again
+      }
+    }
+  } catch (error) {
+    console.error('[ParseDecompressed] Error:', error)
+  }
+
+  return tracklist
+}
+
+async function parseTrackList (buffer, startPos) {
+  const tracklist = []
+
+  try {
+    let pos = startPos
+    const marker = buffer.toString('ascii', pos, pos + 4)
+
+    if (marker !== 'mhlt') {
+      console.warn(`[ParseTrackList] Expected 'mhlt', got '${marker}'`)
+      return tracklist
+    }
+
+    pos += 4
+    const mhltHeaderSize = readUInt32LE(buffer.slice(pos, pos + 4))
+    pos += 4
+    const numTracks = readUInt32LE(buffer.slice(pos, pos + 4))
+
+
+    // Skip to first MHIT
+    pos = startPos + mhltHeaderSize
+
+    for (let i = 0; i < numTracks && pos < buffer.length; i++) {
+      const track = await parseTrackFromBuffer(buffer, pos, i)
+      if (track && track.track) {
+        tracklist.push(track)
+      } else {
+      }
+
+      // Move to next track
+      const mhitTotalSize = readUInt32LE(buffer.slice(pos + 8, pos + 12))
+      pos += mhitTotalSize
+    }
+  } catch (error) {
+    console.error('[ParseTrackList] Error:', error)
+  }
+
+  return tracklist
+}
+
+async function parseTrackFromBuffer (buffer, trackStart, sequenceIndex) {
+  try {
+    const marker = buffer.toString('ascii', trackStart, trackStart + 4)
+    if (marker !== 'mhit') {
+      console.warn(`[ParseTrack] Expected 'mhit', got '${marker}' at ${trackStart}`)
+      return null
+    }
+
+    let pos = trackStart + 4
+    const mhitHeaderSize = readUInt32LE(buffer.slice(pos, pos + 4))
+    pos += 4
+    const mhitTotalSize = readUInt32LE(buffer.slice(pos, pos + 4))
+    pos += 4
+    const numMhods = readUInt32LE(buffer.slice(pos, pos + 4))
+    pos += 4
+
+    // Read track ID (but use sequenceIndex instead for Play Counts matching)
+    const trackId = readUInt32LE(buffer.slice(pos, pos + 4))
+    pos += 4
+
+    // Skip 20 bytes
+    pos += 20
+
+    // Read track length (in milliseconds)
+    const trackLength = readUInt32LE(buffer.slice(pos, pos + 4))
+
+    const track = {
+      track: '',
+      artist: '',
+      album: '',
+      playCount: 0,
+      lastPlayed: 0,
+      id: sequenceIndex,
+      length: trackLength
+    }
+
+    // Skip to MHOD records
+    let mhodPos = trackStart + mhitHeaderSize
+    const mhitEnd = trackStart + mhitTotalSize
+
+    for (let i = 0; i < numMhods && mhodPos < mhitEnd; i++) {
+      const mhodSize = parseMhodFromBuffer(buffer, mhodPos, track)
+      mhodPos += mhodSize
+    }
+
+    return track
+  } catch (error) {
+    console.error('[ParseTrack] Error:', error)
+    return null
+  }
+}
+
+function parseMhodFromBuffer (buffer, mhodStart, track) {
+  try {
+    const marker = buffer.toString('ascii', mhodStart, mhodStart + 4)
+    if (marker !== 'mhod') {
+      console.warn(`[ParseMhod] Expected 'mhod', got '${marker}' at ${mhodStart}`)
+      return 4
+    }
+
+    let pos = mhodStart + 4
+    const mhodHeaderSize = readUInt32LE(buffer.slice(pos, pos + 4))
+    pos += 4
+    const mhodTotalSize = readUInt32LE(buffer.slice(pos, pos + 4))
+    pos += 4
+    const mhodType = readUInt32LE(buffer.slice(pos, pos + 4))
+
+    // Skip to string data after header
+    pos = mhodStart + mhodHeaderSize
+
+    if (pos + 16 > buffer.length) {
+      return mhodTotalSize
+    }
+
+    const encodingCode = readUInt32LE(buffer.slice(pos, pos + 4))
+    pos += 4
+    const strLen = readUInt32LE(buffer.slice(pos, pos + 4))
+    pos += 4
+    // Skip language and flags
+    pos += 8
+
+
+    if (strLen > 0 && strLen < 10000 && pos + strLen <= buffer.length) {
+      let str
+      if (encodingCode === 1) {
+        // UTF-16LE
+        str = buffer.toString('utf16le', pos, pos + strLen)
+      } else {
+        // UTF-8
+        str = buffer.toString('utf8', pos, pos + strLen)
+      }
+      str = str.replace(/\0/g, '') // Remove null terminators
+
+
+      switch (mhodType) {
+        case 1:
+          track.track = str
+          break
+        case 3:
+          track.album = str
+          break
+        case 4:
+          track.artist = str
+          break
+      }
+    } else {
+    }
+
+    return mhodTotalSize
+  } catch (error) {
+    console.error('[ParseMhod] Error:', error)
+    return 4
+  }
+}
+
+async function searchMhitInBuffer (buffer, length, tracklist, handler, offset) {
+  for (let i = 0; i < length - 4; i++) {
+    if (buffer[i] === 109) { // 'm'
+      const nextBytes = buffer.toString('utf8', i + 1, i + 4)
+      if (nextBytes === 'hit') {
+        const track = await parseMhit(handler, offset + i + 4)
+        if (track && track.track) {
+          tracklist.push(track)
+        }
+      }
+    }
+  }
 }
 
 async function readBytesAtPosition (handler, buffer, position, length) {
@@ -56,45 +310,32 @@ async function readBytesAtPosition (handler, buffer, position, length) {
   }
 }
 
+function readUInt32LE (buffer) {
+  return buffer.readUInt32LE(0)
+}
+
 async function parseMhit (handler, startOffset) {
   const track = {}
   let bytesOffset = startOffset
-
   let totalSize = 0
-
   const dword = Buffer.alloc(4)
 
-  const readHeaderSize = await readBytesAtPosition(
-    handler,
-    dword,
-    bytesOffset,
-    4
-  )
+  await readBytesAtPosition(handler, dword, bytesOffset, 4)
   const headerSize = Number(littleEndianToBigInt(dword))
-
   bytesOffset += 4
+  bytesOffset += 4 // Skip 4 bytes
 
-  // Skip 4 bytes
-  bytesOffset += 4
-
-  const mhodEntries = await readBytesAtPosition(handler, dword, bytesOffset, 4)
+  await readBytesAtPosition(handler, dword, bytesOffset, 4)
   const mhodEntriesCount = Number(littleEndianToBigInt(dword))
-
   bytesOffset += 4
 
-  const trackId = await readBytesAtPosition(handler, dword, bytesOffset, 4)
-  const trackIdValue = Number(littleEndianToBigInt(dword))
-  track.id = trackIdValue
-
+  await readBytesAtPosition(handler, dword, bytesOffset, 4)
+  track.id = Number(littleEndianToBigInt(dword))
   bytesOffset += 4
+  bytesOffset += 20 // Skip 20 bytes
 
-  // skip 20 bytes
-  bytesOffset += 20
-
-  const trackLength = await readBytesAtPosition(handler, dword, bytesOffset, 4)
-  const trackLengthValue = Number(littleEndianToBigInt(dword))
-  track.length = trackLengthValue
-
+  await readBytesAtPosition(handler, dword, bytesOffset, 4)
+  track.length = Number(littleEndianToBigInt(dword))
   bytesOffset += 4
 
   for (let i = 0; i < mhodEntriesCount; ++i) {
@@ -110,49 +351,37 @@ async function parsemhod (track, handler, startOffset, headerSize) {
 
   bytesOffset += 8
 
-  const totalSize = await readBytesAtPosition(handler, dword, bytesOffset, 4)
+  await readBytesAtPosition(handler, dword, bytesOffset, 4)
   const totalSizeValue = Number(littleEndianToBigInt(dword))
-
   bytesOffset += 4
 
-  const mhodType = await readBytesAtPosition(handler, dword, bytesOffset, 4)
+  await readBytesAtPosition(handler, dword, bytesOffset, 4)
   const mhodTypeValue = Number(littleEndianToBigInt(dword))
-
   bytesOffset += 4
 
-  if (mhodTypeValue == 1 || mhodTypeValue == 3 || mhodTypeValue == 4) {
+  if (mhodTypeValue === 1 || mhodTypeValue === 3 || mhodTypeValue === 4) {
     bytesOffset += 12
 
-    const stringLength = await readBytesAtPosition(
-      handler,
-      dword,
-      bytesOffset,
-      4
-    )
+    await readBytesAtPosition(handler, dword, bytesOffset, 4)
     const stringLengthValue = Number(littleEndianToBigInt(dword))
-
     bytesOffset += 12
 
-    const dataArray = Buffer.alloc(stringLengthValue)
-    const data = await readBytesAtPosition(
-      handler,
-      dataArray,
-      bytesOffset,
-      stringLengthValue
-    )
+    if (stringLengthValue > 0 && stringLengthValue < 10000) {
+      const dataArray = Buffer.alloc(stringLengthValue)
+      await readBytesAtPosition(handler, dataArray, bytesOffset, stringLengthValue)
+      const stringData = dataArray.toString('utf16le')
 
-    const stringData = dataArray.toString('utf16le')
-
-    switch (mhodTypeValue) {
-      case 1:
-        track.track = stringData
-        break
-      case 3:
-        track.album = stringData
-        break
-      case 4:
-        track.artist = stringData
-        break
+      switch (mhodTypeValue) {
+        case 1:
+          track.track = stringData
+          break
+        case 3:
+          track.album = stringData
+          break
+        case 4:
+          track.artist = stringData
+          break
+      }
     }
   }
   return totalSizeValue
@@ -169,7 +398,6 @@ function littleEndianToBigInt (byteArray) {
 
 async function parsePlayCounts (filePath, tracklist) {
   try {
-    console.log('Reading "Play Counts" file:', filePath)
 
     const handler = await open(filePath, 'r')
 
@@ -200,6 +428,8 @@ async function parsePlayCounts (filePath, tracklist) {
 
     bytesOffset += 80
 
+    let tracksWithPlays = 0
+
     for (let i = 0; i < numEntries - 1; i++) {
       let lastPlayedCollection = []
       let savedBytes = bytesOffset
@@ -228,23 +458,41 @@ async function parsePlayCounts (filePath, tracklist) {
         var offset = new Date().getTimezoneOffset() * 60
         lastPlayed += offset
 
-        tracklist[i].playCount = playCount
-        tracklist[i].lastPlayed = lastPlayed
+        // CRITICAL FIX: Match by ID instead of array index, because compressed and uncompressed formats
+        // may have different track ordering. The Play Counts file uses a fixed index order that doesn't
+        // match the order returned by the compressed parser.
+        const trackIndex = tracklist.findIndex(t => t.id === i)
+        if (trackIndex !== -1) {
+          tracklist[trackIndex].playCount = playCount
+          tracklist[trackIndex].lastPlayed = lastPlayed
+          tracksWithPlays++
+        } else {
+          // No matching track found for this play count index
+        }
       }
 
       bytesOffset = savedBytes + entryLen
     }
     if (handler) {
       await handler.close()
-      console.log('File handler for play counts closed successfully.')
     }
   } catch (error) {
     console.error('Error:', error)
   }
 }
 
+async function findItunesDbFile (path) {
+  const fs = require('fs/promises')
+  try {
+    await fs.access(path + 'iTunesCDB')
+    return path + 'iTunesCDB'
+  } catch {
+    return path + 'iTunesDB'
+  }
+}
+
 export async function getRecentTracks (path) {
-  const iTunesDbPath = path + 'iTunesDB'
+  const iTunesDbPath = await findItunesDbFile(path)
   const playCountsPath = path + 'Play Counts'
   const tracklist = await parse(iTunesDbPath, playCountsPath)
 

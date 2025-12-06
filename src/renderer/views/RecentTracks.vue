@@ -24,9 +24,7 @@ const { tracklist, selectedTracklist, toggleTrackSelection } = useTracklist()
 
 const toggleTrack = track => {
   track.disabled = !track.disabled
-  console.log('toggle Track for ID', track.id)
   toggleTrackSelection(track.id)
-  console.log(selectedTracklist)
 }
 const calculateDifference = timestamp => {
   const lastPlayedDate = new Date(timestamp * 1000)
