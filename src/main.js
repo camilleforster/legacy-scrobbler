@@ -119,10 +119,14 @@ async function handleReadFile (event, { path, action }) {
   try {
     if (action === 'getDeviceState') {
       const libraryFolder = existsSync(path)
-      const recentPlays = existsSync(path + '/Play Counts')
+      const hasPlayCounts = existsSync(path + '/Play Counts')
+      const hasCompressedDb = existsSync(path + '/iTunesCDB')
+      
       if (!libraryFolder) {
         return 'not-connected'
-      } else if (!recentPlays) {
+      } else if (!hasPlayCounts && !hasCompressedDb) {
+        // For uncompressed format, need Play Counts file
+        // For compressed format (iTunesCDB), play counts are in the database
         return 'no-plays'
       } else {
         return 'ready'

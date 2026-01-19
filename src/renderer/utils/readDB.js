@@ -190,18 +190,35 @@ async function parseTrackFromBuffer (buffer, trackStart, sequenceIndex) {
     const trackId = readUInt32LE(buffer.slice(pos, pos + 4))
     pos += 4
 
-    // Skip 20 bytes
+    // Skip 20 bytes to get to track length
     pos += 20
 
-    // Read track length (in milliseconds)
+    // Read track length (in milliseconds) - offset 0x28 from start
     const trackLength = readUInt32LE(buffer.slice(pos, pos + 4))
+    pos += 4
+
+    // Read play count - offset 0x50 from start (trackStart + 0x50)
+    const playCountOffset = trackStart + 0x50
+    const playCount = readUInt32LE(buffer.slice(playCountOffset, playCountOffset + 4))
+
+    // Read last played time - offset 0x58 from start (Mac HFS timestamp)
+    const lastPlayedOffset = trackStart + 0x58
+    let lastPlayed = readUInt32LE(buffer.slice(lastPlayedOffset, lastPlayedOffset + 4))
+    
+    // Convert from Mac HFS epoch (Jan 1, 1904) to Unix epoch (Jan 1, 1970)
+    if (lastPlayed > 0) {
+      lastPlayed -= 2082844800
+      // Adjust for timezone
+      const tzOffset = new Date().getTimezoneOffset() * 60
+      lastPlayed += tzOffset
+    }
 
     const track = {
       track: '',
       artist: '',
       album: '',
-      playCount: 0,
-      lastPlayed: 0,
+      playCount: playCount,
+      lastPlayed: lastPlayed,
       id: sequenceIndex,
       length: trackLength
     }
@@ -500,11 +517,26 @@ export async function getRecentTracks (path) {
     entry => entry.playCount && entry.playCount > 0
   )
   recentPlays.sort((a, b) => b.lastPlayed - a.lastPlayed)
+  
+  // Log tracks with plays
+  console.log(`\n🎵 Found ${recentPlays.length} tracks with plays:\n`)
+  recentPlays.forEach((track, index) => {
+    const lastPlayedDate = new Date(track.lastPlayed * 1000).toLocaleString()
+    console.log(`${index + 1}. "${track.track}" by ${track.artist || 'Unknown Artist'}`)
+    console.log(`   Album: ${track.album || 'Unknown Album'} | Plays: ${track.playCount} | Last Played: ${lastPlayedDate}\n`)
+  })
+  
   return recentPlays
 }
 
 export async function parse (iTunesDbPath, playCountsPath) {
   const tracklist = await parseItunesDb(iTunesDbPath)
-  await parsePlayCounts(playCountsPath, tracklist)
+  
+  // Only read Play Counts file for uncompressed iTunesDB format
+  // Compressed iTunesCDB stores play counts directly in the database
+  if (!isCompressed(iTunesDbPath)) {
+    await parsePlayCounts(playCountsPath, tracklist)
+  }
+  
   return tracklist
 }
