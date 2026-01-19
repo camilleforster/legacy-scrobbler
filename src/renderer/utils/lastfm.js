@@ -101,9 +101,28 @@ export async function updateProfile () {
   return true
 }
 
-export async function scrobbleTracks(tracklist) {
+// Expand tracklist so each play becomes a separate scrobble
+function expandTracksByPlayCount(tracklist) {
+  const expanded = []
+  for (const track of tracklist) {
+    const plays = track.playCount || 1
+    const trackLength = Math.floor((track.length || 180000) / 1000) // seconds
+    for (let i = 0; i < plays; i++) {
+      expanded.push({
+        ...track,
+        playCount: 1,
+        lastPlayed: track.lastPlayed - (i * trackLength) // space out timestamps
+      })
+    }
+  }
+  console.log(`📊 Expanded ${tracklist.length} tracks into ${expanded.length} scrobbles`)
+  return expanded
+}
 
-  if (await sendScrobbleRequest(tracklist)) {
+export async function scrobbleTracks(tracklist) {
+  const expanded = expandTracksByPlayCount(tracklist)
+  
+  if (await sendScrobbleRequest(expanded)) {
       return { status: true }
   }
 
